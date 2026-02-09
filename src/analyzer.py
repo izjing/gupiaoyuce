@@ -686,33 +686,66 @@ class GeminiAnalyzer:
         max_retries = config.gemini_max_retries
         base_delay = config.gemini_retry_delay
 
-        def _build_base_request_kwargs() -> dict:
+        def _build_response_request_kwargs() -> dict:
+            # Use Responses API payload format. Some OpenAI-compatible gateways
+            # (including ai.qaq.al) do not provide /v1/chat/completions.
             kwargs = {
                 "model": self._current_model_name,
-                "messages": [
-                    {"role": "system", "content": self.SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
+                "instructions": self.SYSTEM_PROMPT,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": prompt,
+                            }
+                        ],
+                    }
                 ],
                 "temperature": generation_config.get('temperature', config.openai_temperature),
+                "store": False,
             }
+
+            max_output_tokens = generation_config.get('max_output_tokens', 8192)
+            if max_output_tokens:
+                kwargs["max_output_tokens"] = max_output_tokens
             return kwargs
 
-        def _is_unsupported_param_error(error_message: str, param_name: str) -> bool:
-            lower_msg = error_message.lower()
-            return ('400' in lower_msg or "unsupported parameter" in lower_msg or "unsupported param" in lower_msg) and param_name in lower_msg
+        def _extract_response_text(response: Any) -> str:
+            # SDK object shortcut
+            output_text = getattr(response, "output_text", None)
+            if isinstance(output_text, str) and output_text.strip():
+                return output_text
 
-        if not hasattr(self, "_token_param_mode"):
-            self._token_param_mode = {}
+            # SDK object detailed output
+            output_items = getattr(response, "output", None)
+            if output_items:
+                for item in output_items:
+                    if getattr(item, "type", "") != "message":
+                        continue
+                    for part in getattr(item, "content", []) or []:
+                        if getattr(part, "type", "") == "output_text":
+                            text = getattr(part, "text", None)
+                            if isinstance(text, str) and text.strip():
+                                return text
 
-        max_output_tokens = generation_config.get('max_output_tokens', 8192)
-        model_name = self._current_model_name
-        mode = self._token_param_mode.get(model_name, "max_tokens")
+            # Dict fallback (for non-standard wrappers)
+            if isinstance(response, dict):
+                text = response.get("output_text")
+                if isinstance(text, str) and text.strip():
+                    return text
 
-        def _kwargs_with_mode(mode_value):
-            kwargs = _build_base_request_kwargs()
-            if mode_value is not None:
-                kwargs[mode_value] = max_output_tokens
-            return kwargs
+                for item in response.get("output", []) or []:
+                    if not isinstance(item, dict) or item.get("type") != "message":
+                        continue
+                    for part in item.get("content", []) or []:
+                        if isinstance(part, dict) and part.get("type") == "output_text":
+                            text = part.get("text")
+                            if isinstance(text, str) and text.strip():
+                                return text
+
+            raise ValueError("OpenAI Responses API 返回为空或格式不支持")
 
         for attempt in range(max_retries):
             try:
@@ -722,25 +755,8 @@ class GeminiAnalyzer:
                     logger.info(f"[OpenAI] 第 {attempt + 1} 次重试，等待 {delay:.1f} 秒...")
                     time.sleep(delay)
 
-                try:
-                    response = self._openai_client.chat.completions.create(**_kwargs_with_mode(mode))
-                except Exception as e:
-                    error_str = str(e)
-                    if mode == "max_tokens" and _is_unsupported_param_error(error_str, "max_tokens"):
-                        mode = "max_completion_tokens"
-                        self._token_param_mode[model_name] = mode
-                        response = self._openai_client.chat.completions.create(**_kwargs_with_mode(mode))
-                    elif mode == "max_completion_tokens" and _is_unsupported_param_error(error_str, "max_completion_tokens"):
-                        mode = None
-                        self._token_param_mode[model_name] = mode
-                        response = self._openai_client.chat.completions.create(**_kwargs_with_mode(mode))
-                    else:
-                        raise
-
-                if response and response.choices and response.choices[0].message.content:
-                    return response.choices[0].message.content
-                else:
-                    raise ValueError("OpenAI API 返回空响应")
+                response = self._openai_client.responses.create(**_build_response_request_kwargs())
+                return _extract_response_text(response)
                     
             except Exception as e:
                 error_str = str(e)
