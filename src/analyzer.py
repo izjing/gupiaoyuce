@@ -686,30 +686,27 @@ class GeminiAnalyzer:
         max_retries = config.gemini_max_retries
         base_delay = config.gemini_retry_delay
 
-        def _build_response_request_kwargs() -> dict:
+        def _build_response_request_kwargs(minimal: bool = False) -> dict:
             # Use Responses API payload format. Some OpenAI-compatible gateways
-            # (including ai.qaq.al) do not provide /v1/chat/completions.
+            # only accept a subset of fields, so we provide a minimal fallback payload.
             kwargs = {
                 "model": self._current_model_name,
-                "instructions": self.SYSTEM_PROMPT,
                 "input": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": prompt,
-                            }
-                        ],
-                    }
+                    {"role": "system", "content": self.SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
                 ],
-                "temperature": generation_config.get('temperature', config.openai_temperature),
-                "store": False,
             }
 
-            max_output_tokens = generation_config.get('max_output_tokens', 8192)
-            if max_output_tokens:
-                kwargs["max_output_tokens"] = max_output_tokens
+            if not minimal:
+                kwargs["store"] = False
+                temperature = generation_config.get('temperature', config.openai_temperature)
+                if temperature is not None:
+                    kwargs["temperature"] = temperature
+
+                max_output_tokens = generation_config.get('max_output_tokens', 8192)
+                if max_output_tokens:
+                    kwargs["max_output_tokens"] = max_output_tokens
+
             return kwargs
 
         def _extract_response_text(response: Any) -> str:
@@ -755,7 +752,18 @@ class GeminiAnalyzer:
                     logger.info(f"[OpenAI] 第 {attempt + 1} 次重试，等待 {delay:.1f} 秒...")
                     time.sleep(delay)
 
-                response = self._openai_client.responses.create(**_build_response_request_kwargs())
+                try:
+                    response = self._openai_client.responses.create(**_build_response_request_kwargs(minimal=False))
+                except Exception as full_error:
+                    full_error_str = str(full_error)
+                    # Some gateways reject optional fields or strict content schemas.
+                    # Retry once with minimal payload before entering exponential backoff.
+                    if '400' in full_error_str or 'upstream_error' in full_error_str.lower():
+                        logger.warning("[OpenAI] 全量参数请求失败，尝试最小兼容请求")
+                        response = self._openai_client.responses.create(**_build_response_request_kwargs(minimal=True))
+                    else:
+                        raise
+
                 return _extract_response_text(response)
                     
             except Exception as e:
