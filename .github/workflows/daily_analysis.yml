@@ -17,6 +17,11 @@ on:
           - full          # 完整分析（股票+大盘）
           - market-only   # 仅大盘复盘
           - stocks-only   # 仅股票分析
+      branch:
+        description: '执行代码分支（留空使用 vars.ANALYSIS_BRANCH 或默认分支）'
+        required: false
+        default: ''
+        type: string
 
 # 并发控制：同一时间只运行一个分析任务
 concurrency:
@@ -35,6 +40,9 @@ jobs:
       
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || vars.ANALYSIS_BRANCH || github.event.repository.default_branch }}
+          fetch-depth: 1
       
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
@@ -162,6 +170,7 @@ jobs:
           echo "🚀 A股自选股智能分析系统"
           echo "=========================================="
           echo "⏰ 时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
+          echo "🌿 执行分支: ${{ github.event.inputs.branch || vars.ANALYSIS_BRANCH || github.event.repository.default_branch }}"
           echo "🎯 运行模式: $MODE"
           echo "📊 自选股: $STOCK_LIST"
           echo "📝 报告类型: $REPORT_TYPE"
